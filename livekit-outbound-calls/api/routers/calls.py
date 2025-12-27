@@ -1,21 +1,42 @@
-"""Calls API endpoints."""
+"""Calls API endpoints with multi-tenancy support."""
 import logging
 from typing import Optional
+from datetime import datetime, timezone, timedelta
 
 from fastapi import APIRouter, HTTPException, Query, Depends
 
 from database.models import CallStatus, CreateCallRequest, CallResponse
+from database.connection import get_database
 from services import CallService, WebhookService
 from services.s3_service import S3Service
-from auth.dependencies import get_current_user
+from auth.dependencies import get_current_user, get_current_user_optional
 from auth.models import User
 
 logger = logging.getLogger("api.calls")
 router = APIRouter()
 
 
+def get_workspace_filter(user: Optional[User]) -> dict:
+    """
+    Build workspace filter for queries.
+    Returns empty dict if no user (auth disabled).
+    Includes backwards compatibility: matches workspace_id OR null (legacy data).
+    """
+    if user and user.workspace_id:
+        # Match either user's workspace OR null (legacy data without workspace)
+        return {"$or": [
+            {"workspace_id": user.workspace_id},
+            {"workspace_id": None},
+            {"workspace_id": {"$exists": False}},
+        ]}
+    return {}
+
+
 @router.post("/calls", response_model=CallResponse)
-async def create_call(request: CreateCallRequest):
+async def create_call(
+    request: CreateCallRequest,
+    user: Optional[User] = Depends(get_current_user_optional),
+):
     """
     Trigger a new outbound call.
     
@@ -31,12 +52,13 @@ async def create_call(request: CreateCallRequest):
         )
     
     try:
-        call = await CallService.create_call(request)
+        workspace_id = user.workspace_id if user else None
+        call = await CallService.create_call(request, workspace_id=workspace_id)
         
         if call.webhook_url:
             await WebhookService.send_initiated(call)
         
-        logger.info(f"Call created: {call.call_id}")
+        logger.info(f"Call created: {call.call_id} (workspace: {workspace_id})")
         
         return CallResponse(
             call_id=call.call_id,
@@ -51,9 +73,13 @@ async def create_call(request: CreateCallRequest):
 
 
 @router.get("/calls/{call_id}")
-async def get_call(call_id: str):
+async def get_call(
+    call_id: str,
+    user: Optional[User] = Depends(get_current_user_optional),
+):
     """Get details of a specific call."""
-    call = await CallService.get_call(call_id)
+    workspace_id = user.workspace_id if user else None
+    call = await CallService.get_call(call_id, workspace_id=workspace_id)
     
     if not call:
         raise HTTPException(status_code=404, detail="Call not found")
@@ -71,6 +97,7 @@ async def list_calls(
     phone_number: Optional[str] = Query(None),
     limit: int = Query(50, ge=1, le=100),
     skip: int = Query(0, ge=0),
+    user: Optional[User] = Depends(get_current_user_optional),
 ):
     """List calls with optional filters."""
     status_enum = None
@@ -83,11 +110,13 @@ async def list_calls(
                 detail=f"Invalid status. Must be one of: {[s.value for s in CallStatus]}"
             )
     
+    workspace_id = user.workspace_id if user else None
     calls = await CallService.list_calls(
         status=status_enum,
         phone_number=phone_number,
         limit=limit,
         skip=skip,
+        workspace_id=workspace_id,
     )
     
     call_dicts = []
@@ -106,9 +135,13 @@ async def list_calls(
 
 
 @router.get("/calls/{call_id}/analysis")
-async def get_call_analysis(call_id: str):
+async def get_call_analysis(
+    call_id: str,
+    user: Optional[User] = Depends(get_current_user_optional),
+):
     """Get post-call analysis for a specific call."""
-    call = await CallService.get_call(call_id)
+    workspace_id = user.workspace_id if user else None
+    call = await CallService.get_call(call_id, workspace_id=workspace_id)
     
     if not call:
         raise HTTPException(status_code=404, detail="Call not found")
@@ -123,11 +156,15 @@ async def get_call_analysis(call_id: str):
 
 
 @router.post("/calls/{call_id}/analyze")
-async def trigger_analysis(call_id: str):
+async def trigger_analysis(
+    call_id: str,
+    user: Optional[User] = Depends(get_current_user_optional),
+):
     """Manually trigger post-call analysis."""
     from services import AnalysisService
     
-    call = await CallService.get_call(call_id)
+    workspace_id = user.workspace_id if user else None
+    call = await CallService.get_call(call_id, workspace_id=workspace_id)
     
     if not call:
         raise HTTPException(status_code=404, detail="Call not found")
@@ -148,14 +185,16 @@ async def trigger_analysis(call_id: str):
 
 
 @router.get("/analytics/calls")
-async def get_call_analytics():
-    """Get aggregated call analytics."""
-    from database.connection import get_database
-    
+async def get_call_analytics(
+    user: Optional[User] = Depends(get_current_user_optional),
+):
+    """Get aggregated call analytics for current workspace."""
     db = get_database()
+    workspace_filter = get_workspace_filter(user)
     
     # Get total counts by status
     pipeline = [
+        {"$match": workspace_filter} if workspace_filter else {"$match": {}},
         {"$group": {
             "_id": "$status",
             "count": {"$sum": 1},
@@ -171,19 +210,16 @@ async def get_call_analytics():
         }
     
     # Get today's calls
-    from datetime import datetime, timezone, timedelta
     today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
-    
-    today_count = await db.calls.count_documents({
-        "created_at": {"$gte": today_start.isoformat()}
-    })
+    today_filter = {**workspace_filter, "created_at": {"$gte": today_start.isoformat()}}
+    today_count = await db.calls.count_documents(today_filter)
     
     # Total calls
-    total_calls = await db.calls.count_documents({})
+    total_calls = await db.calls.count_documents(workspace_filter if workspace_filter else {})
     
     # Sentiment distribution (from analyzed calls)
     sentiment_pipeline = [
-        {"$match": {"analysis.sentiment": {"$exists": True}}},
+        {"$match": {**workspace_filter, "analysis.sentiment": {"$exists": True}}},
         {"$group": {"_id": "$analysis.sentiment", "count": {"$sum": 1}}}
     ]
     
@@ -202,18 +238,19 @@ async def get_call_analytics():
 @router.get("/analytics/summary")
 async def get_analytics_summary(
     days: int = Query(7, ge=1, le=90),
+    user: Optional[User] = Depends(get_current_user_optional),
 ):
-    """Get call summary for the last N days."""
-    from database.connection import get_database
-    from datetime import datetime, timezone, timedelta
-    
+    """Get call summary for the last N days for current workspace."""
     db = get_database()
+    workspace_filter = get_workspace_filter(user)
     
     start_date = datetime.now(timezone.utc) - timedelta(days=days)
     
-    # Daily breakdown
+    # Daily breakdown with workspace filter
+    match_filter = {**workspace_filter, "created_at": {"$gte": start_date.isoformat()}}
+    
     pipeline = [
-        {"$match": {"created_at": {"$gte": start_date.isoformat()}}},
+        {"$match": match_filter},
         {"$addFields": {
             "date_str": {"$substr": ["$created_at", 0, 10]}
         }},

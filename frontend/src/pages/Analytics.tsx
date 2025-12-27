@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { DashboardLayout } from "@/components/layout/DashboardLayout";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -24,7 +24,6 @@ import {
   CartesianGrid,
   Tooltip,
   ResponsiveContainer,
-  Legend,
 } from "recharts";
 import {
   Phone,
@@ -37,17 +36,122 @@ import {
   ThumbsUp,
   ThumbsDown,
   Minus,
+  Loader2,
+  AlertCircle,
 } from "lucide-react";
-import { mockAnalyticsData } from "@/data/mockAnalytics";
 import { toast } from "sonner";
+import { analyticsApi, assistantsApi } from "@/lib/api";
+
+interface AnalyticsData {
+  totalCalls: number;
+  todayCalls: number;
+  completedCalls: number;
+  answeredCalls: number;
+  failedCalls: number;
+  totalDuration: number;
+  avgDuration: number;
+  answerRate: number;
+  avgCostPerCall: number;
+  byStatus: Record<string, { count: number; total_duration_seconds: number }>;
+  bySentiment: Record<string, number>;
+}
+
+interface DailyBreakdown {
+  date: string;
+  total: number;
+  completed: number;
+  answered: number;
+  failed: number;
+}
 
 export default function Analytics() {
-  const [timeRange, setTimeRange] = useState("7d");
-  const data = mockAnalyticsData;
+  const [timeRange, setTimeRange] = useState("7");
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [analytics, setAnalytics] = useState<AnalyticsData | null>(null);
+  const [dailyData, setDailyData] = useState<DailyBreakdown[]>([]);
+  const [assistants, setAssistants] = useState<any[]>([]);
+
+  const fetchAnalytics = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      // Use authenticated API client
+      const [analyticsData, summaryData, assistantsData] = await Promise.all([
+        analyticsApi.getCalls(),
+        analyticsApi.getSummary(parseInt(timeRange)),
+        assistantsApi.list().catch(() => ({ assistants: [] })),
+      ]) as [any, any, any];
+
+      // Parse status breakdown
+      const byStatus = analyticsData.by_status || {};
+      const completedStats = byStatus["completed"] || { count: 0, total_duration_seconds: 0 };
+      const answeredStats = byStatus["answered"] || { count: 0, total_duration_seconds: 0 };
+      const failedStats = byStatus["failed"] || { count: 0, total_duration_seconds: 0 };
+      const initiatedStats = byStatus["initiated"] || { count: 0, total_duration_seconds: 0 };
+
+      const totalCalls = analyticsData.total_calls || 0;
+      const completedCalls = completedStats.count + answeredStats.count;
+      const failedCalls = failedStats.count;
+
+      // Calculate total duration from all statuses
+      let totalDuration = 0;
+      Object.values(byStatus).forEach((stat: any) => {
+        totalDuration += stat.total_duration_seconds || 0;
+      });
+
+      const avgDuration = totalCalls > 0 ? totalDuration / totalCalls : 0;
+      const answerRate = totalCalls > 0 ? ((completedCalls / totalCalls) * 100) : 0;
+      const avgCostPerCall = avgDuration * 0.001; // Rough estimate: $0.001 per second
+
+      setAnalytics({
+        totalCalls,
+        todayCalls: analyticsData.today_calls || 0,
+        completedCalls,
+        answeredCalls: answeredStats.count,
+        failedCalls,
+        totalDuration,
+        avgDuration,
+        answerRate,
+        avgCostPerCall,
+        byStatus,
+        bySentiment: analyticsData.by_sentiment || {},
+      });
+
+      // Parse daily breakdown
+      const daily = summaryData.daily_breakdown || [];
+      setDailyData(daily.map((d: any) => ({
+        date: formatDateShort(d.date),
+        total: d.total,
+        completed: d.completed + d.answered,
+        missed: d.failed,
+      })));
+
+      // Set assistants from already-fetched data
+      setAssistants(assistantsData.assistants || []);
+
+    } catch (err: any) {
+      console.error("Analytics fetch error:", err);
+      setError(err.message || "Failed to load analytics");
+    } finally {
+      setLoading(false);
+    }
+  }, [timeRange]);
+
+  useEffect(() => {
+    fetchAnalytics();
+  }, [fetchAnalytics]);
+
+  const formatDateShort = (dateStr: string) => {
+    if (!dateStr) return "";
+    const date = new Date(dateStr);
+    return date.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+  };
 
   const formatDuration = (seconds: number) => {
+    if (!seconds || isNaN(seconds)) return "0:00";
     const mins = Math.floor(seconds / 60);
-    const secs = seconds % 60;
+    const secs = Math.floor(seconds % 60);
     return `${mins}:${secs.toString().padStart(2, "0")}`;
   };
 
@@ -55,36 +159,85 @@ export default function Analytics() {
     toast.success(`Exporting analytics as ${format.toUpperCase()}...`);
   };
 
-  const metrics = [
+  // Build sentiment distribution for pie chart
+  const sentimentDistribution = analytics?.bySentiment
+    ? [
+      { sentiment: "Positive", count: analytics.bySentiment["positive"] || 0, color: "hsl(142, 76%, 36%)" },
+      { sentiment: "Neutral", count: analytics.bySentiment["neutral"] || 0, color: "hsl(48, 96%, 53%)" },
+      { sentiment: "Negative", count: analytics.bySentiment["negative"] || 0, color: "hsl(0, 84%, 60%)" },
+    ].filter(s => s.count > 0)
+    : [];
+
+  const totalSentiment = sentimentDistribution.reduce((acc, s) => acc + s.count, 0);
+
+  // Build metrics cards
+  const metrics = analytics ? [
     {
       title: "Total Calls",
-      value: data.overview.totalCalls.toLocaleString(),
-      change: "+12.5%",
+      value: analytics.totalCalls.toLocaleString(),
+      change: `${analytics.todayCalls} today`,
       positive: true,
       icon: Phone,
     },
     {
       title: "Avg Duration",
-      value: formatDuration(data.overview.avgDuration),
-      change: "+8.2%",
+      value: formatDuration(analytics.avgDuration),
+      change: formatDuration(analytics.totalDuration) + " total",
       positive: true,
       icon: Clock,
     },
     {
       title: "Answer Rate",
-      value: `${data.overview.answerRate}%`,
-      change: "+2.1%",
-      positive: true,
+      value: `${analytics.answerRate.toFixed(1)}%`,
+      change: `${analytics.completedCalls} answered`,
+      positive: analytics.answerRate > 50,
       icon: TrendingUp,
     },
     {
       title: "Avg Cost/Call",
-      value: `$${data.overview.avgCostPerCall.toFixed(2)}`,
-      change: "-5.3%",
+      value: `$${analytics.avgCostPerCall.toFixed(2)}`,
+      change: "estimated",
       positive: true,
       icon: DollarSign,
     },
+  ] : [];
+
+  // Generate peak hours from daily data (placeholder, would need hourly data from backend)
+  const peakHours = [
+    { hour: "8 AM", calls: Math.floor(Math.random() * 20) + 5 },
+    { hour: "9 AM", calls: Math.floor(Math.random() * 30) + 10 },
+    { hour: "10 AM", calls: Math.floor(Math.random() * 40) + 15 },
+    { hour: "11 AM", calls: Math.floor(Math.random() * 50) + 20 },
+    { hour: "12 PM", calls: Math.floor(Math.random() * 30) + 10 },
+    { hour: "1 PM", calls: Math.floor(Math.random() * 25) + 8 },
+    { hour: "2 PM", calls: Math.floor(Math.random() * 35) + 12 },
+    { hour: "3 PM", calls: Math.floor(Math.random() * 45) + 18 },
+    { hour: "4 PM", calls: Math.floor(Math.random() * 50) + 20 },
+    { hour: "5 PM", calls: Math.floor(Math.random() * 40) + 15 },
+    { hour: "6 PM", calls: Math.floor(Math.random() * 20) + 5 },
   ];
+
+  if (loading) {
+    return (
+      <DashboardLayout>
+        <div className="flex h-[50vh] items-center justify-center">
+          <Loader2 className="h-8 w-8 animate-spin text-primary" />
+        </div>
+      </DashboardLayout>
+    );
+  }
+
+  if (error) {
+    return (
+      <DashboardLayout>
+        <div className="flex h-[50vh] flex-col items-center justify-center gap-4">
+          <AlertCircle className="h-12 w-12 text-destructive" />
+          <p className="text-lg text-muted-foreground">{error}</p>
+          <Button onClick={fetchAnalytics}>Retry</Button>
+        </div>
+      </DashboardLayout>
+    );
+  }
 
   return (
     <DashboardLayout>
@@ -103,10 +256,10 @@ export default function Analytics() {
                 <SelectValue placeholder="Time range" />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="24h">Last 24 hours</SelectItem>
-                <SelectItem value="7d">Last 7 days</SelectItem>
-                <SelectItem value="30d">Last 30 days</SelectItem>
-                <SelectItem value="90d">Last 90 days</SelectItem>
+                <SelectItem value="1">Last 24 hours</SelectItem>
+                <SelectItem value="7">Last 7 days</SelectItem>
+                <SelectItem value="30">Last 30 days</SelectItem>
+                <SelectItem value="90">Last 90 days</SelectItem>
               </SelectContent>
             </Select>
             <Button variant="outline" onClick={() => handleExport("csv")}>
@@ -155,45 +308,53 @@ export default function Analytics() {
             </CardHeader>
             <CardContent>
               <div className="h-[300px]">
-                <ResponsiveContainer width="100%" height="100%">
-                  <AreaChart data={data.callsOverTime}>
-                    <defs>
-                      <linearGradient id="colorCompleted" x1="0" y1="0" x2="0" y2="1">
-                        <stop offset="5%" stopColor="hsl(var(--primary))" stopOpacity={0.3} />
-                        <stop offset="95%" stopColor="hsl(var(--primary))" stopOpacity={0} />
-                      </linearGradient>
-                    </defs>
-                    <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
-                    <XAxis
-                      dataKey="date"
-                      stroke="hsl(var(--muted-foreground))"
-                      fontSize={12}
-                    />
-                    <YAxis stroke="hsl(var(--muted-foreground))" fontSize={12} />
-                    <Tooltip
-                      contentStyle={{
-                        backgroundColor: "hsl(var(--card))",
-                        border: "1px solid hsl(var(--border))",
-                        borderRadius: "8px",
-                      }}
-                    />
-                    <Area
-                      type="monotone"
-                      dataKey="completed"
-                      stroke="hsl(var(--primary))"
-                      fill="url(#colorCompleted)"
-                      strokeWidth={2}
-                    />
-                    <Area
-                      type="monotone"
-                      dataKey="missed"
-                      stroke="hsl(var(--destructive))"
-                      fill="hsl(var(--destructive))"
-                      fillOpacity={0.1}
-                      strokeWidth={2}
-                    />
-                  </AreaChart>
-                </ResponsiveContainer>
+                {dailyData.length > 0 ? (
+                  <ResponsiveContainer width="100%" height="100%">
+                    <AreaChart data={dailyData}>
+                      <defs>
+                        <linearGradient id="colorCompleted" x1="0" y1="0" x2="0" y2="1">
+                          <stop offset="5%" stopColor="hsl(var(--primary))" stopOpacity={0.3} />
+                          <stop offset="95%" stopColor="hsl(var(--primary))" stopOpacity={0} />
+                        </linearGradient>
+                      </defs>
+                      <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
+                      <XAxis
+                        dataKey="date"
+                        stroke="hsl(var(--muted-foreground))"
+                        fontSize={12}
+                      />
+                      <YAxis stroke="hsl(var(--muted-foreground))" fontSize={12} />
+                      <Tooltip
+                        contentStyle={{
+                          backgroundColor: "hsl(var(--card))",
+                          border: "1px solid hsl(var(--border))",
+                          borderRadius: "8px",
+                        }}
+                      />
+                      <Area
+                        type="monotone"
+                        dataKey="completed"
+                        stroke="hsl(var(--primary))"
+                        fill="url(#colorCompleted)"
+                        strokeWidth={2}
+                        name="Completed"
+                      />
+                      <Area
+                        type="monotone"
+                        dataKey="missed"
+                        stroke="hsl(var(--destructive))"
+                        fill="hsl(var(--destructive))"
+                        fillOpacity={0.1}
+                        strokeWidth={2}
+                        name="Failed"
+                      />
+                    </AreaChart>
+                  </ResponsiveContainer>
+                ) : (
+                  <div className="flex h-full items-center justify-center text-muted-foreground">
+                    No call data for selected period
+                  </div>
+                )}
               </div>
             </CardContent>
           </Card>
@@ -207,7 +368,7 @@ export default function Analytics() {
             <CardContent>
               <div className="h-[300px]">
                 <ResponsiveContainer width="100%" height="100%">
-                  <BarChart data={data.peakHours}>
+                  <BarChart data={peakHours}>
                     <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
                     <XAxis
                       dataKey="hour"
@@ -244,44 +405,52 @@ export default function Analytics() {
             </CardHeader>
             <CardContent>
               <div className="h-[200px]">
-                <ResponsiveContainer width="100%" height="100%">
-                  <PieChart>
-                    <Pie
-                      data={data.sentimentDistribution}
-                      cx="50%"
-                      cy="50%"
-                      innerRadius={50}
-                      outerRadius={80}
-                      paddingAngle={4}
-                      dataKey="count"
-                    >
-                      {data.sentimentDistribution.map((entry, index) => (
-                        <Cell key={`cell-${index}`} fill={entry.color} />
-                      ))}
-                    </Pie>
-                    <Tooltip
-                      contentStyle={{
-                        backgroundColor: "hsl(var(--card))",
-                        border: "1px solid hsl(var(--border))",
-                        borderRadius: "8px",
-                      }}
-                    />
-                  </PieChart>
-                </ResponsiveContainer>
-              </div>
-              <div className="mt-4 flex justify-center gap-4">
-                {data.sentimentDistribution.map((item) => (
-                  <div key={item.sentiment} className="flex items-center gap-2">
-                    <div
-                      className="h-3 w-3 rounded-full"
-                      style={{ backgroundColor: item.color }}
-                    />
-                    <span className="text-sm text-muted-foreground">
-                      {item.sentiment}
-                    </span>
+                {sentimentDistribution.length > 0 ? (
+                  <ResponsiveContainer width="100%" height="100%">
+                    <PieChart>
+                      <Pie
+                        data={sentimentDistribution}
+                        cx="50%"
+                        cy="50%"
+                        innerRadius={50}
+                        outerRadius={80}
+                        paddingAngle={4}
+                        dataKey="count"
+                      >
+                        {sentimentDistribution.map((entry, index) => (
+                          <Cell key={`cell-${index}`} fill={entry.color} />
+                        ))}
+                      </Pie>
+                      <Tooltip
+                        contentStyle={{
+                          backgroundColor: "hsl(var(--card))",
+                          border: "1px solid hsl(var(--border))",
+                          borderRadius: "8px",
+                        }}
+                      />
+                    </PieChart>
+                  </ResponsiveContainer>
+                ) : (
+                  <div className="flex h-full items-center justify-center text-muted-foreground">
+                    No sentiment data available
                   </div>
-                ))}
+                )}
               </div>
+              {sentimentDistribution.length > 0 && (
+                <div className="mt-4 flex justify-center gap-4">
+                  {sentimentDistribution.map((item) => (
+                    <div key={item.sentiment} className="flex items-center gap-2">
+                      <div
+                        className="h-3 w-3 rounded-full"
+                        style={{ backgroundColor: item.color }}
+                      />
+                      <span className="text-sm text-muted-foreground">
+                        {item.sentiment} ({item.count})
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
             </CardContent>
           </Card>
 
@@ -293,36 +462,36 @@ export default function Analytics() {
             </CardHeader>
             <CardContent>
               <div className="space-y-6">
-                {data.agentPerformance.map((agent) => (
-                  <div key={agent.agentId} className="space-y-3">
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center gap-3">
-                        <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-primary/10">
-                          <Bot className="h-4 w-4 text-primary" />
+                {assistants.length > 0 ? (
+                  assistants.slice(0, 3).map((agent: any) => (
+                    <div key={agent.assistant_id || agent._id} className="space-y-3">
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-3">
+                          <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-primary/10">
+                            <Bot className="h-4 w-4 text-primary" />
+                          </div>
+                          <div>
+                            <p className="font-medium">{agent.name}</p>
+                            <p className="text-sm text-muted-foreground">
+                              {agent.model || "OpenAI Realtime"}
+                            </p>
+                          </div>
                         </div>
-                        <div>
-                          <p className="font-medium">{agent.agentName}</p>
-                          <p className="text-sm text-muted-foreground">
-                            {agent.calls} calls · {formatDuration(agent.avgDuration)} avg
-                          </p>
-                        </div>
-                      </div>
-                      <div className="flex items-center gap-4 text-sm">
-                        <div className="text-right">
-                          <p className="font-medium text-emerald-400">
-                            {agent.successRate}%
-                          </p>
-                          <p className="text-xs text-muted-foreground">Success</p>
-                        </div>
-                        <div className="text-right">
-                          <p className="font-medium">{agent.sentiment}%</p>
-                          <p className="text-xs text-muted-foreground">Sentiment</p>
+                        <div className="flex items-center gap-4 text-sm">
+                          <div className="text-right">
+                            <p className="font-medium text-emerald-400">Active</p>
+                            <p className="text-xs text-muted-foreground">Status</p>
+                          </div>
                         </div>
                       </div>
+                      <Progress value={75} className="h-2" />
                     </div>
-                    <Progress value={agent.successRate} className="h-2" />
+                  ))
+                ) : (
+                  <div className="flex h-[120px] items-center justify-center text-muted-foreground">
+                    No agents configured
                   </div>
-                ))}
+                )}
               </div>
             </CardContent>
           </Card>
@@ -335,23 +504,23 @@ export default function Analytics() {
               <MessageSquare className="h-5 w-5" />
               Conversation Insights
             </CardTitle>
-            <CardDescription>Top intents and conversation patterns</CardDescription>
+            <CardDescription>Call status breakdown and quick stats</CardDescription>
           </CardHeader>
           <CardContent>
             <div className="grid gap-6 md:grid-cols-2">
-              {/* Top Intents */}
+              {/* Status Breakdown */}
               <div className="space-y-4">
-                <h4 className="font-medium">Top Intents</h4>
+                <h4 className="font-medium">Call Status</h4>
                 <div className="space-y-3">
-                  {data.topIntents.map((intent) => (
-                    <div key={intent.intent} className="space-y-1">
+                  {analytics && Object.entries(analytics.byStatus).map(([status, data]: [string, any]) => (
+                    <div key={status} className="space-y-1">
                       <div className="flex items-center justify-between text-sm">
-                        <span>{intent.intent}</span>
+                        <span className="capitalize">{status}</span>
                         <span className="text-muted-foreground">
-                          {intent.count} ({intent.percentage}%)
+                          {data.count} ({analytics.totalCalls > 0 ? ((data.count / analytics.totalCalls) * 100).toFixed(1) : 0}%)
                         </span>
                       </div>
-                      <Progress value={intent.percentage} className="h-1.5" />
+                      <Progress value={analytics.totalCalls > 0 ? (data.count / analytics.totalCalls) * 100 : 0} className="h-1.5" />
                     </div>
                   ))}
                 </div>
@@ -366,28 +535,34 @@ export default function Analytics() {
                       <ThumbsUp className="h-4 w-4 text-emerald-400" />
                       <span className="text-sm text-muted-foreground">Positive</span>
                     </div>
-                    <p className="mt-2 text-2xl font-bold">55%</p>
+                    <p className="mt-2 text-2xl font-bold">
+                      {totalSentiment > 0 ? Math.round(((analytics?.bySentiment["positive"] || 0) / totalSentiment) * 100) : 0}%
+                    </p>
                   </div>
                   <div className="rounded-lg border border-border bg-muted/50 p-4">
                     <div className="flex items-center gap-2">
                       <Minus className="h-4 w-4 text-amber-400" />
                       <span className="text-sm text-muted-foreground">Neutral</span>
                     </div>
-                    <p className="mt-2 text-2xl font-bold">33%</p>
+                    <p className="mt-2 text-2xl font-bold">
+                      {totalSentiment > 0 ? Math.round(((analytics?.bySentiment["neutral"] || 0) / totalSentiment) * 100) : 0}%
+                    </p>
                   </div>
                   <div className="rounded-lg border border-border bg-muted/50 p-4">
                     <div className="flex items-center gap-2">
                       <ThumbsDown className="h-4 w-4 text-destructive" />
                       <span className="text-sm text-muted-foreground">Negative</span>
                     </div>
-                    <p className="mt-2 text-2xl font-bold">12%</p>
+                    <p className="mt-2 text-2xl font-bold">
+                      {totalSentiment > 0 ? Math.round(((analytics?.bySentiment["negative"] || 0) / totalSentiment) * 100) : 0}%
+                    </p>
                   </div>
                   <div className="rounded-lg border border-border bg-muted/50 p-4">
                     <div className="flex items-center gap-2">
                       <TrendingUp className="h-4 w-4 text-primary" />
-                      <span className="text-sm text-muted-foreground">Escalation</span>
+                      <span className="text-sm text-muted-foreground">Today</span>
                     </div>
-                    <p className="mt-2 text-2xl font-bold">8%</p>
+                    <p className="mt-2 text-2xl font-bold">{analytics?.todayCalls || 0}</p>
                   </div>
                 </div>
               </div>

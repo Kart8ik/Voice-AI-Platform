@@ -52,6 +52,7 @@ interface CallDetailSheetProps {
 export function CallDetailSheet({ open, onOpenChange, call }: CallDetailSheetProps) {
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
+  const [audioDuration, setAudioDuration] = useState(0);
   const intervalRef = useRef<NodeJS.Timeout | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
 
@@ -70,14 +71,26 @@ export function CallDetailSheet({ open, onOpenChange, call }: CallDetailSheetPro
   }, [open]);
 
   useEffect(() => {
+    if (!call?.recording_url) return;
+
     // Only try to play http/https URLs natively
-    if (call?.recording_url && call.recording_url.startsWith('http') && !audioRef.current) {
-      audioRef.current = new Audio(call.recording_url);
-      audioRef.current.addEventListener('ended', () => setIsPlaying(false));
-      audioRef.current.addEventListener('timeupdate', () => {
-        if (audioRef.current) setCurrentTime(audioRef.current.currentTime);
-      });
-    }
+    audioRef.current = new Audio(call.recording_url);
+    audioRef.current.addEventListener('ended', () => setIsPlaying(false));
+    audioRef.current.addEventListener('timeupdate', () => {
+      if (audioRef.current) setCurrentTime(audioRef.current.currentTime);
+    });
+    audioRef.current.addEventListener('loadedmetadata', () => {
+      if (audioRef.current) {
+        // Force update to ensure slider max is correct
+        const duration = audioRef.current.duration;
+        if (duration && !isNaN(duration) && duration !== Infinity) {
+          // We could store this in state if we want to re-render slider immediately with correct max
+          // access a new state variable or just rely on re-render?
+          // simpler: set a state variable 'audioDuration'
+          setAudioDuration(duration);
+        }
+      }
+    });
   }, [call]);
 
   useEffect(() => {
@@ -92,6 +105,7 @@ export function CallDetailSheet({ open, onOpenChange, call }: CallDetailSheetPro
 
   // Format duration helper
   const formatDuration = (seconds: number) => {
+    if (!seconds || isNaN(seconds) || seconds === Infinity) return "0:00";
     const mins = Math.floor(seconds / 60);
     const secs = Math.floor(seconds % 60);
     return `${mins}:${secs.toString().padStart(2, '0')}`;
@@ -152,6 +166,7 @@ export function CallDetailSheet({ open, onOpenChange, call }: CallDetailSheetPro
   }
 
   const isPlayable = call.recording_url && call.recording_url.startsWith('http');
+  const durationToDisplay = audioDuration || call.duration_seconds || 0;
 
   return (
     <Sheet open={open} onOpenChange={onOpenChange}>
@@ -250,7 +265,7 @@ export function CallDetailSheet({ open, onOpenChange, call }: CallDetailSheetPro
                       <div className="flex-1 space-y-2">
                         <Slider
                           value={[currentTime]}
-                          max={call.duration_seconds || 100}
+                          max={durationToDisplay || 100} // Fallback to 100 on initial render if no metadata, but update quickly
                           step={1}
                           onValueChange={([value]) => {
                             setCurrentTime(value);
@@ -260,7 +275,7 @@ export function CallDetailSheet({ open, onOpenChange, call }: CallDetailSheetPro
                         />
                         <div className="flex justify-between text-xs text-muted-foreground">
                           <span>{formatDuration(currentTime)}</span>
-                          <span>{formatDuration(call.duration_seconds)}</span>
+                          <span>{formatDuration(durationToDisplay)}</span>
                         </div>
                       </div>
                       <Button variant="ghost" size="icon" className="h-8 w-8 shrink-0" asChild>

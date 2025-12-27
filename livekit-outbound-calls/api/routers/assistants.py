@@ -1,4 +1,4 @@
-"""Assistants API endpoints."""
+"""Assistants API endpoints with multi-tenancy support."""
 import logging
 from typing import Optional
 
@@ -10,7 +10,7 @@ from database.models import (
     AssistantResponse,
 )
 from services import AssistantService
-from auth.dependencies import get_current_user
+from auth.dependencies import get_current_user_optional
 from auth.models import User
 
 logger = logging.getLogger("api.assistants")
@@ -20,7 +20,7 @@ router = APIRouter()
 @router.post("/assistants", response_model=AssistantResponse)
 async def create_assistant(
     request: CreateAssistantRequest,
-    user: Optional[User] = Depends(get_current_user)
+    user: Optional[User] = Depends(get_current_user_optional)
 ):
     """
     Create a new AI assistant.
@@ -51,9 +51,9 @@ async def list_assistants(
     is_active: Optional[bool] = Query(None),
     limit: int = Query(50, ge=1, le=100),
     skip: int = Query(0, ge=0),
-    user: Optional[User] = Depends(get_current_user)
+    user: Optional[User] = Depends(get_current_user_optional)
 ):
-    """List all assistants."""
+    """List all assistants for current workspace."""
     workspace_id = user.workspace_id if user else None
     assistants = await AssistantService.list_assistants(
         workspace_id=workspace_id,
@@ -69,9 +69,13 @@ async def list_assistants(
 
 
 @router.get("/assistants/{assistant_id}")
-async def get_assistant(assistant_id: str):
+async def get_assistant(
+    assistant_id: str,
+    user: Optional[User] = Depends(get_current_user_optional)
+):
     """Get a specific assistant."""
-    assistant = await AssistantService.get_assistant(assistant_id)
+    workspace_id = user.workspace_id if user else None
+    assistant = await AssistantService.get_assistant(assistant_id, workspace_id=workspace_id)
     
     if not assistant:
         raise HTTPException(status_code=404, detail="Assistant not found")
@@ -80,9 +84,14 @@ async def get_assistant(assistant_id: str):
 
 
 @router.patch("/assistants/{assistant_id}")
-async def update_assistant(assistant_id: str, request: UpdateAssistantRequest):
+async def update_assistant(
+    assistant_id: str,
+    request: UpdateAssistantRequest,
+    user: Optional[User] = Depends(get_current_user_optional)
+):
     """Update an assistant."""
-    assistant = await AssistantService.update_assistant(assistant_id, request)
+    workspace_id = user.workspace_id if user else None
+    assistant = await AssistantService.update_assistant(assistant_id, request, workspace_id=workspace_id)
     
     if not assistant:
         raise HTTPException(status_code=404, detail="Assistant not found")
@@ -95,9 +104,13 @@ async def update_assistant(assistant_id: str, request: UpdateAssistantRequest):
 
 
 @router.delete("/assistants/{assistant_id}")
-async def delete_assistant(assistant_id: str):
+async def delete_assistant(
+    assistant_id: str,
+    user: Optional[User] = Depends(get_current_user_optional)
+):
     """Delete an assistant."""
-    deleted = await AssistantService.delete_assistant(assistant_id)
+    workspace_id = user.workspace_id if user else None
+    deleted = await AssistantService.delete_assistant(assistant_id, workspace_id=workspace_id)
     
     if not deleted:
         raise HTTPException(status_code=404, detail="Assistant not found")

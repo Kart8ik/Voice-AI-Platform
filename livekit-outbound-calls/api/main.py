@@ -61,7 +61,7 @@ def create_app() -> FastAPI:
     )
     
     # Register routers
-    from api.routers import calls, health, assistants, phone_numbers, sip_configs, campaigns, tools, queue, auth
+    from api.routers import calls, health, assistants, phone_numbers, sip_configs, campaigns, tools, job_queue, auth
     from auth.dependencies import get_current_user
     
     # Public routes (no auth required)
@@ -75,7 +75,7 @@ def create_app() -> FastAPI:
     app.include_router(campaigns.router, prefix="/api", tags=["Campaigns"], dependencies=[Depends(get_current_user)])
     app.include_router(tools.router, prefix="/api", tags=["Tools"], dependencies=[Depends(get_current_user)])
     app.include_router(calls.router, prefix="/api", tags=["Calls"], dependencies=[Depends(get_current_user)])
-    app.include_router(queue.router, prefix="/api", tags=["Queue"], dependencies=[Depends(get_current_user)])
+    app.include_router(job_queue.router, prefix="/api", tags=["Queue"], dependencies=[Depends(get_current_user)])
     
     return app
 

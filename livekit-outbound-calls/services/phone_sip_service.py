@@ -21,27 +21,30 @@ class PhoneNumberService:
     """Service for managing phone numbers."""
     
     @staticmethod
-    async def add_phone_number(request: CreatePhoneNumberRequest) -> PhoneNumber:
+    async def add_phone_number(request: CreatePhoneNumberRequest, workspace_id: str = None) -> PhoneNumber:
         """Add a new phone number."""
         db = get_database()
         
         phone = PhoneNumber(
+            workspace_id=workspace_id,
             number=request.number,
             label=request.label,
             provider=request.provider,
         )
         
         await db.phone_numbers.insert_one(phone.to_dict())
-        logger.info(f"Added phone number: {phone.phone_id} - {phone.number}")
+        logger.info(f"Added phone number: {phone.phone_id} - {phone.number} (workspace: {workspace_id})")
         
         return phone
     
     @staticmethod
-    async def list_phone_numbers(is_active: Optional[bool] = None) -> List[PhoneNumber]:
-        """List all phone numbers."""
+    async def list_phone_numbers(workspace_id: str = None, is_active: Optional[bool] = None) -> List[PhoneNumber]:
+        """List all phone numbers, scoped by workspace."""
         db = get_database()
         
         query = {}
+        if workspace_id:
+            query["workspace_id"] = workspace_id
         if is_active is not None:
             query["is_active"] = is_active
         
@@ -54,19 +57,25 @@ class PhoneNumberService:
         return phones
     
     @staticmethod
-    async def get_phone_number(phone_id: str) -> Optional[PhoneNumber]:
-        """Get a phone number by ID."""
+    async def get_phone_number(phone_id: str, workspace_id: str = None) -> Optional[PhoneNumber]:
+        """Get a phone number by ID, scoped by workspace."""
         db = get_database()
-        doc = await db.phone_numbers.find_one({"phone_id": phone_id})
+        query = {"phone_id": phone_id}
+        if workspace_id:
+            query["workspace_id"] = workspace_id
+        doc = await db.phone_numbers.find_one(query)
         if doc:
             return PhoneNumber.from_dict(doc)
         return None
     
     @staticmethod
-    async def delete_phone_number(phone_id: str) -> bool:
-        """Delete a phone number."""
+    async def delete_phone_number(phone_id: str, workspace_id: str = None) -> bool:
+        """Delete a phone number, scoped by workspace."""
         db = get_database()
-        result = await db.phone_numbers.delete_one({"phone_id": phone_id})
+        query = {"phone_id": phone_id}
+        if workspace_id:
+            query["workspace_id"] = workspace_id
+        result = await db.phone_numbers.delete_one(query)
         return result.deleted_count > 0
 
 

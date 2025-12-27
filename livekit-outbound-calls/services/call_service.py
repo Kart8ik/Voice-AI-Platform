@@ -26,12 +26,13 @@ class CallService:
         return f"call-{phone_clean}-{random_suffix}"
     
     @staticmethod
-    async def create_call(request: CreateCallRequest) -> CallRecord:
+    async def create_call(request: CreateCallRequest, workspace_id: Optional[str] = None) -> CallRecord:
         """
         Create a new call record and dispatch the agent.
         
         Args:
             request: Call creation request with phone number and options
+            workspace_id: Workspace ID for multi-tenancy
             
         Returns:
             Created CallRecord
@@ -77,6 +78,7 @@ class CallService:
         # Create call record
         call = CallRecord(
             call_id=call_id,
+            workspace_id=workspace_id,  # Multi-tenancy
             phone_number=request.phone_number,
             from_number=request.from_number,
             room_name=room_name,
@@ -142,10 +144,18 @@ class CallService:
             await lk_api.aclose()
     
     @staticmethod
-    async def get_call(call_id: str) -> Optional[CallRecord]:
-        """Get a call record by ID."""
+    async def get_call(call_id: str, workspace_id: Optional[str] = None) -> Optional[CallRecord]:
+        """Get a call record by ID, optionally filtered by workspace (with legacy support)."""
         db = get_database()
-        doc = await db.calls.find_one({"call_id": call_id})
+        query = {"call_id": call_id}
+        if workspace_id:
+            # Include legacy calls without workspace_id
+            query["$or"] = [
+                {"workspace_id": workspace_id},
+                {"workspace_id": None},
+                {"workspace_id": {"$exists": False}},
+            ]
+        doc = await db.calls.find_one(query)
         if doc:
             return CallRecord.from_dict(doc)
         return None
@@ -171,12 +181,20 @@ class CallService:
         phone_number: Optional[str] = None,
         limit: int = 50,
         skip: int = 0,
+        workspace_id: Optional[str] = None,
     ) -> List[CallRecord]:
-        """List calls with optional filters."""
+        """List calls with optional filters, scoped by workspace (with legacy support)."""
         db = get_database()
         
-        # Build query
+        # Build query with workspace filter (backwards compatible)
         query = {}
+        if workspace_id:
+            # Include legacy calls without workspace_id
+            query["$or"] = [
+                {"workspace_id": workspace_id},
+                {"workspace_id": None},
+                {"workspace_id": {"$exists": False}},
+            ]
         if status:
             query["status"] = status.value
         if phone_number:

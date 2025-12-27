@@ -78,10 +78,16 @@ class AssistantService:
     @staticmethod
     async def update_assistant(
         assistant_id: str, 
-        request: UpdateAssistantRequest
+        request: UpdateAssistantRequest,
+        workspace_id: str = None
     ) -> Optional[Assistant]:
-        """Update an assistant."""
+        """Update an assistant, scoped by workspace."""
         db = get_database()
+        
+        # Build query with workspace filter
+        query = {"assistant_id": assistant_id}
+        if workspace_id:
+            query["workspace_id"] = workspace_id
         
         # Build update dict with only provided fields
         updates = {}
@@ -98,7 +104,7 @@ class AssistantService:
             updates["updated_at"] = datetime.now(timezone.utc).isoformat()
             
             result = await db.assistants.find_one_and_update(
-                {"assistant_id": assistant_id},
+                query,
                 {"$set": updates},
                 return_document=True,
             )
@@ -110,10 +116,13 @@ class AssistantService:
         return None
     
     @staticmethod
-    async def delete_assistant(assistant_id: str) -> bool:
-        """Delete an assistant."""
+    async def delete_assistant(assistant_id: str, workspace_id: str = None) -> bool:
+        """Delete an assistant, scoped by workspace."""
         db = get_database()
-        result = await db.assistants.delete_one({"assistant_id": assistant_id})
+        query = {"assistant_id": assistant_id}
+        if workspace_id:
+            query["workspace_id"] = workspace_id
+        result = await db.assistants.delete_one(query)
         
         if result.deleted_count > 0:
             logger.info(f"Deleted assistant: {assistant_id}")
