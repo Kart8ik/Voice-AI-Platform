@@ -46,6 +46,13 @@ docker-compose up -d --build
 ```
 Access the **Frontend** at http://localhost:3000 and **API Docs** at http://localhost:8000/docs.
 
+## 📚 API Documentation
+
+A comprehensive **Postman Collection** is included in the project to help you test the API endpoints.
+
+*   **Location**: [`postman/postman_collection.json`](./postman/postman_collection.json)
+*   **Usage**: Import this file into Postman to see pre-configured requests for Authentication, Campaigns, Calls, and more.
+
 ---
 
 ## 💻 Local Development Setup
