@@ -13,7 +13,9 @@ import {
   ChevronRight,
   LogOut,
   Users,
+  FileText,
 } from "lucide-react";
+
 import { cn } from "@/lib/utils";
 import { useAuth } from "@/contexts/AuthContext";
 import { Button } from "@/components/ui/button";
@@ -34,6 +36,7 @@ const navigation = [
 ];
 
 const bottomNavigation = [
+  { name: "Documentation", href: "http://localhost:8000/docs", icon: FileText },
   { name: "Settings", href: "/settings", icon: Settings },
 ];
 
@@ -47,17 +50,17 @@ export function AppSidebar() {
   const NavItem = ({ item }: { item: typeof navigation[0] }) => {
     const active = isActive(item.href);
     const Icon = item.icon;
+    const isExternal = item.href.startsWith("http");
 
-    const content = (
-      <Link
-        to={item.href}
-        className={cn(
-          "flex items-center gap-3 rounded-lg px-3 py-2 text-sm transition-colors",
-          active
-            ? "bg-primary text-primary-foreground"
-            : "text-muted-foreground hover:bg-accent hover:text-accent-foreground"
-        )}
-      >
+    const linkClasses = cn(
+      "flex items-center gap-3 rounded-lg px-3 py-2 text-sm transition-colors",
+      active
+        ? "bg-primary text-primary-foreground"
+        : "text-muted-foreground hover:bg-accent hover:text-accent-foreground"
+    );
+
+    const innerContent = (
+      <>
         <Icon className="h-5 w-5 shrink-0" />
         {!collapsed && (
           <motion.span
@@ -69,6 +72,21 @@ export function AppSidebar() {
             {item.name}
           </motion.span>
         )}
+      </>
+    );
+
+    const content = isExternal ? (
+      <a
+        href={item.href}
+        target="_blank"
+        rel="noopener noreferrer"
+        className={linkClasses}
+      >
+        {innerContent}
+      </a>
+    ) : (
+      <Link to={item.href} className={linkClasses}>
+        {innerContent}
       </Link>
     );
 
