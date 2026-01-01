@@ -162,9 +162,83 @@ async def send_webhook(call_id: str, event: str):
         logger.error(f"Webhook failed: {e}")
 
 
+async def get_inbound_assistant_config(room_name: str) -> dict:
+    """
+    Fetch assistant config for inbound calls.
+    Looks up the phone number from the room name and gets the assigned assistant's prompts.
+    
+    Returns dict with:
+      - system_prompt: The assistant's instructions
+      - first_message: The greeting to say when answering
+      - assistant_id: The assistant ID for tracking
+    """
+    try:
+        from motor.motor_asyncio import AsyncIOMotorClient
+        
+        if not config.MONGODB_URI:
+            logger.warning("No MongoDB URI - using default prompts")
+            return {}
+        
+        client = AsyncIOMotorClient(config.MONGODB_URI)
+        db = client[config.MONGODB_DB_NAME]
+        
+        # Find inbound phone numbers that might match this room
+        # The dispatch rule creates rooms with prefix "call-" or "inbound-"
+        # We need to find which phone number this call came in on
+        
+        # For now, get the first active inbound number's assistant
+        # (In production, you'd extract the called number from SIP headers)
+        phone_doc = await db.phone_numbers.find_one({
+            "direction": "inbound",
+            "is_active": True,
+            "assistant_id": {"$exists": True, "$ne": None}
+        })
+        
+        if not phone_doc:
+            logger.warning("No inbound phone number with assistant found")
+            client.close()
+            return {}
+        
+        assistant_id = phone_doc.get("assistant_id")
+        inbound_number = phone_doc.get("number", "unknown")
+        logger.info(f"[INBOUND] Found phone {inbound_number} -> assistant {assistant_id}")
+        
+        # Fetch the assistant's configuration
+        assistant_doc = await db.assistants.find_one({"assistant_id": assistant_id})
+        client.close()
+        
+        if not assistant_doc:
+            logger.warning(f"Assistant {assistant_id} not found in DB")
+            return {"assistant_id": assistant_id}
+        
+        # Extract prompts from assistant
+        result = {
+            "assistant_id": assistant_id,
+            "assistant_name": assistant_doc.get("name", "Assistant"),
+            "system_prompt": assistant_doc.get("system_prompt", ""),
+            "first_message": assistant_doc.get("first_message", ""),
+            "inbound_number": inbound_number,
+        }
+        
+        # Also check voice_config for any custom settings
+        voice_config = assistant_doc.get("voice_config", {})
+        if voice_config:
+            result["voice_config"] = voice_config
+        
+        logger.info(f"[INBOUND] Loaded assistant '{result['assistant_name']}' for inbound call")
+        return result
+        
+    except Exception as e:
+        logger.error(f"Failed to get inbound assistant config: {e}")
+        return {}
+
+
 async def entrypoint(ctx: agents.JobContext):
     """Main entrypoint for the agent."""
     logger.info(f"Connecting to room: {ctx.room.name}")
+    
+    # Import model factory
+    from services.agent.model_factory import get_stt, get_llm, get_tts, get_realtime_model
     
     # Parse metadata
     phone_number = None
@@ -173,9 +247,26 @@ async def entrypoint(ctx: agents.JobContext):
     sip_trunk_id = config.OUTBOUND_TRUNK_ID
     custom_instructions = None
     first_message = None
-    voice_id = config.OPENAI_REALTIME_VOICE
-    temperature = 0.8
     webhook_url = None
+    temperature = 0.8
+    
+    # Voice configuration (user-selectable models)
+    voice_config = {
+        "mode": "realtime",  # realtime or pipeline
+        "voice_id": config.OPENAI_REALTIME_VOICE,
+        "temperature": 0.8,
+        # Realtime mode
+        "realtime_provider": "openai",
+        "realtime_model": "gpt-4o-realtime-preview",
+        # Pipeline mode (STT → LLM → TTS)
+        "stt_provider": "deepgram",
+        "stt_model": "nova-2",
+        "stt_language": "en",
+        "llm_provider": "openai",
+        "llm_model": "gpt-4o-mini",
+        "tts_provider": "openai",
+        "tts_model": "tts-1",
+    }
     
     try:
         if ctx.job.metadata:
@@ -186,27 +277,55 @@ async def entrypoint(ctx: agents.JobContext):
             sip_trunk_id = data.get("sip_trunk_id", config.OUTBOUND_TRUNK_ID)
             custom_instructions = data.get("instructions")
             first_message = data.get("first_message")
-            voice_id = data.get("voice_id", config.OPENAI_REALTIME_VOICE)
-            temperature = data.get("temperature", 0.8)
             webhook_url = data.get("webhook_url")
+            temperature = data.get("temperature", 0.8)
+            
+            # Update voice_config from metadata (user-selected settings)
+            if "voice_config" in data:
+                voice_config.update(data["voice_config"])
+            # Legacy support for simple voice_id
+            elif "voice_id" in data:
+                voice_config["voice_id"] = data["voice_id"]
+            
+            voice_config["temperature"] = temperature
+            
     except Exception:
         logger.warning("No valid JSON metadata found.")
 
     # Use room name as call_id if not provided
     if not call_id:
         call_id = ctx.room.name
+    
+    # Detect inbound vs outbound call
+    # Inbound: room name starts with "inbound-" or "call-" (set by dispatch rule)
+    is_inbound = ctx.room.name.startswith("inbound-") or ctx.room.name.startswith("call-") or (not phone_number and not ctx.job.metadata)
+    
+    if is_inbound:
+        logger.info(f"[INBOUND CALL] Room: {ctx.room.name}")
+    else:
+        logger.info(f"[OUTBOUND CALL] To: {phone_number}")
 
-    logger.info(f"Using OpenAI Realtime: voice={voice_id}, temp={temperature}")
+    # Create session based on mode
+    mode = voice_config.get("mode", "realtime")
+    logger.info(f"Creating agent session: mode={mode}")
+    
+    if mode == "pipeline":
+        # Pipeline mode: STT → LLM → TTS (more flexible)
+        logger.info(f"Pipeline: STT={voice_config.get('stt_provider')}, LLM={voice_config.get('llm_provider')}, TTS={voice_config.get('tts_provider')}")
+        session = AgentSession(
+            stt=get_stt(voice_config),
+            llm=get_llm(voice_config),
+            tts=get_tts(voice_config),
+        )
+    else:
+        # Realtime mode: Speech-to-Speech (lowest latency)
+        logger.info(f"Realtime: provider={voice_config.get('realtime_provider')}, voice={voice_config.get('voice_id')}")
+        session = AgentSession(
+            llm=get_realtime_model(voice_config),
+        )
+
     if assistant_id:
         logger.info(f"Using assistant: {assistant_id}")
-
-    # Initialize session with assistant config
-    session = AgentSession(
-        llm=openai.realtime.RealtimeModel(
-            voice=voice_id,
-            temperature=temperature,
-        ),
-    )
 
     # Metrics collection
     usage_collector = metrics.UsageCollector()
@@ -255,7 +374,50 @@ async def entrypoint(ctx: agents.JobContext):
         ),
     )
 
-    if phone_number:
+    if is_inbound:
+        # ========== INBOUND CALL ==========
+        # Caller is already in the room - greet them with dynamic prompts
+        logger.info("[INBOUND] Caller connected, fetching assistant config...")
+        
+        try:
+            # Fetch the assistant config for this inbound call
+            inbound_config = await get_inbound_assistant_config(ctx.room.name)
+            
+            # Get prompts from assistant config, with fallbacks
+            inbound_system_prompt = inbound_config.get("system_prompt", "")
+            inbound_first_message = inbound_config.get("first_message", "")
+            inbound_assistant_id = inbound_config.get("assistant_id", "")
+            
+            # Use custom instructions if set in metadata, else use assistant's system prompt
+            effective_instructions = custom_instructions or inbound_system_prompt or """
+                You are a helpful customer service assistant.
+                Be polite, professional, and assist the caller with their needs.
+            """
+            
+            # Use first_message from metadata, then from assistant, then default
+            effective_greeting = first_message or inbound_first_message or "Hello! Thank you for calling. How can I assist you today?"
+            
+            logger.info(f"[INBOUND] Using assistant: {inbound_assistant_id or 'default'}")
+            logger.info(f"[INBOUND] First message: {effective_greeting[:50]}...")
+            
+            # Update call status with assistant info
+            await update_call_in_db(call_id, {
+                "status": "answered",
+                "answered_at": datetime.now(timezone.utc),
+                "direction": "inbound",
+                "assistant_id": inbound_assistant_id,
+            })
+            
+            # Generate greeting for the caller using the assistant's configured prompts
+            await session.generate_reply(
+                instructions=f"{effective_instructions}\n\nGreet the caller warmly and professionally. Say: {effective_greeting}"
+            )
+            logger.info("[INBOUND] Greeting sent, conversation started")
+            
+        except Exception as e:
+            logger.error(f"[INBOUND] Error greeting caller: {e}")
+    
+    elif phone_number:
         logger.info(f"Initiating outbound SIP call to {phone_number}...")
         try:
             await ctx.api.sip.create_sip_participant(
@@ -309,7 +471,7 @@ def run_agent():
     agents.cli.run_app(
         agents.WorkerOptions(
             entrypoint_fnc=entrypoint,
-            agent_name="outbound-caller", 
+            agent_name="voice-assistant", 
         )
     )
 
