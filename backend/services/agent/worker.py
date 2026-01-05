@@ -6,6 +6,7 @@ import logging
 import os
 import json
 import sys
+import httpx
 from datetime import datetime, timezone
 
 # Add project root to path for imports
@@ -366,8 +367,14 @@ async def entrypoint(ctx: agents.JobContext):
             # Send webhook
             await send_webhook(call_id, "completed")
             
-            # Run post-call analysis (disabled - causes timeout on Gemini API)
-            # await run_post_call_analysis(call_id)
+            # Trigger post-call analysis via Backend API (Fire and Forget)
+            try:
+                API_URL = "http://gateway:8000" # Container-to-container URL
+                async with httpx.AsyncClient() as client:
+                    await client.post(f"{API_URL}/api/assistants/analysis/{call_id}", timeout=2.0)
+                logger.info(f"Triggered analysis for {call_id}")
+            except Exception as exc:
+                logger.warning(f"Failed to trigger analysis: {exc}")
             
             # Log usage
             summary = usage_collector.get_summary()
