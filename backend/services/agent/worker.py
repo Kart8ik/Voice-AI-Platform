@@ -338,7 +338,7 @@ async def entrypoint(ctx: agents.JobContext):
     voice_config = update_voice_config(data, is_inbound, inbound_config)
 
     # PART-4: CREATE SESSION BASED ON MODE
-    
+
     mode = voice_config.get("mode", "realtime")
     logger.info(f"Creating agent session: mode={mode}")
     
@@ -486,7 +486,7 @@ async def entrypoint(ctx: agents.JobContext):
     if is_inbound:
         # ========== INBOUND CALL ==========
         # Caller is already in the room - greet them with dynamic prompts
-        logger.info("[INBOUND] Caller connected, fetching assistant config...")
+        logger.info("[INBOUND] Caller connected, initialising prompts and starting conversation")
         
         try:
             
